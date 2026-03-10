@@ -57,7 +57,13 @@ async def run_scan():
 
         console.print("[bold blue]Scanning markets...[/bold blue]")
         candidates = await scanner.scan()
-        console.print(f"[green]Found {len(candidates)} candidates[/green]")
+        top = candidates[:10]
+        console.print(f"[green]Found {len(candidates)} candidates — analysing {len(top)} in parallel...[/green]")
+
+        estimates = await asyncio.gather(
+            *[analyst.analyze(m) for m in top],
+            return_exceptions=True,
+        )
 
         table = Table(title="Top Opportunities", show_lines=True)
         table.add_column("Ticker", style="cyan")
@@ -67,18 +73,18 @@ async def run_scan():
         table.add_column("Edge", justify="right")
         table.add_column("Confidence", justify="right")
 
-        for market in candidates[:10]:
-            estimate = await analyst.analyze(market)
-            if estimate:
-                edge_color = "green" if estimate.edge_pct > 0 else "red"
-                table.add_row(
-                    estimate.ticker,
-                    estimate.market_title[:40],
-                    f"{estimate.market_price_pct:.1f}%",
-                    f"{estimate.true_prob_pct:.1f}%",
-                    f"[{edge_color}]{estimate.edge_pct:+.1f}%[/{edge_color}]",
-                    f"{estimate.confidence:.2f}",
-                )
+        for estimate in estimates:
+            if isinstance(estimate, Exception) or estimate is None:
+                continue
+            edge_color = "green" if estimate.edge_pct > 0 else "red"
+            table.add_row(
+                estimate.ticker,
+                estimate.market_title[:40],
+                f"{estimate.market_price_pct:.1f}%",
+                f"{estimate.true_prob_pct:.1f}%",
+                f"[{edge_color}]{estimate.edge_pct:+.1f}%[/{edge_color}]",
+                f"{estimate.confidence:.2f}",
+            )
 
         console.print(table)
 

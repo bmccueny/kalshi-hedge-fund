@@ -204,7 +204,7 @@ class KalshiClient:
 
     # ── Paginated helpers ──────────────────────────────────────────────────────
 
-    async def get_all_open_markets(self, max_event_pages: int = 3) -> list[dict]:
+    async def get_all_open_markets(self, max_event_pages: int = 1) -> list[dict]:
         """
         Fetch real single-event markets via the events endpoint.
         The /markets endpoint is dominated by low-liquidity parlay markets;
@@ -214,7 +214,7 @@ class KalshiClient:
         event_tickers = []
         cursor = None
         for _ in range(max_event_pages):
-            resp = await self.get_events(status="open", limit=200)
+            resp = await self.get_events(status="open", limit=200, cursor=cursor)
             events = resp.get("events", [])
             event_tickers.extend(e["event_ticker"] for e in events)
             cursor = resp.get("cursor")
@@ -225,7 +225,7 @@ class KalshiClient:
         log.info("kalshi_events_collected", count=len(event_tickers))
 
         # 2. Fetch event details concurrently (markets embedded in response)
-        sem = asyncio.Semaphore(4)
+        sem = asyncio.Semaphore(2)
 
         async def fetch_event_markets(ticker: str) -> list[dict]:
             async with sem:

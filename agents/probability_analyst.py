@@ -130,6 +130,7 @@ Open interest: ${market.get('open_interest', 0)/100:.2f}
 
 Based on all of the above, provide your calibrated probability estimate in the required JSON format."""
 
+        log.info("analyst_calling_ai", ticker=ticker)
         result = await super().analyze(prompt, system=ANALYST_SYSTEM, max_turns=2)
 
         if not result:

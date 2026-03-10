@@ -117,15 +117,18 @@ def start_trading(dry_run: bool):
         cmd = [sys.executable, "main.py"]
         if not dry_run:
             cmd.append("--live")
+        env_unbuf = {**os.environ, "PYTHONUNBUFFERED": "1"}
         st.session_state.trading_process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1
+            bufsize=1,
+            env=env_unbuf,
         )
-        def read_output():
-            for line in st.session_state.trading_process.stdout:
+        proc = st.session_state.trading_process
+        def read_output(p=proc):
+            for line in p.stdout:
                 _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {line.rstrip()}")
         threading.Thread(target=read_output, daemon=True).start()
 
@@ -249,12 +252,14 @@ with col2:
 with col3:
     if st.button("🔄 Scan Markets", type="secondary", disabled=is_scanning()):
         st.session_state.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] --- Starting market scan ---")
+        env_unbuf = {**os.environ, "PYTHONUNBUFFERED": "1"}
         scan_proc = subprocess.Popen(
             [sys.executable, "main.py", "--scan"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1
+            bufsize=1,
+            env=env_unbuf,
         )
         st.session_state.scan_process = scan_proc
         def read_scan_output():
