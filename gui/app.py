@@ -15,12 +15,18 @@ from datetime import datetime
 
 _ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
-# Thread-safe queue for background threads to write log lines into
-_log_queue: queue.Queue = queue.Queue()
-
 import streamlit as st
 import pandas as pd
 import dotenv
+
+# Thread-safe queue for background threads to write log lines into.
+# Must be cache_resource so Streamlit script reruns don't create a new empty
+# queue and lose items the background thread already put into the old one.
+@st.cache_resource
+def _get_log_queue() -> queue.Queue:
+    return queue.Queue()
+
+_log_queue = _get_log_queue()
 
 # Load .env
 dotenv.load_dotenv()
