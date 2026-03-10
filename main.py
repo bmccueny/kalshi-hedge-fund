@@ -47,9 +47,9 @@ async def run_scan():
     from core.kalshi_client import KalshiClient
     from agents.market_scanner import MarketScannerAgent
     from agents.probability_analyst import ProbabilityAnalystAgent
-    from data.news_feed import NewsFeeed
+    from data.news_feed import NewsFeed
 
-    async with KalshiClient() as kalshi, NewsFeeed() as news:
+    async with KalshiClient() as kalshi, NewsFeed() as news:
         scanner = MarketScannerAgent(kalshi)
         analyst = ProbabilityAnalystAgent(kalshi, news)
 

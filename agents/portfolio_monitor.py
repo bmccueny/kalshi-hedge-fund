@@ -15,6 +15,7 @@ This agent:
 """
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from agents.base_agent import BaseAgent
 from core.kalshi_client import KalshiClient
@@ -60,11 +61,44 @@ class PositionStatus:
     reason: str
 
 
+STALE_ANALYSIS_THRESHOLD_SECONDS = 3600  # 1 hour
+
+
 class PortfolioMonitorAgent(BaseAgent):
     def __init__(self, kalshi: KalshiClient, executor=None):
         super().__init__("PortfolioMonitor")
         self.kalshi = kalshi
         self.executor = executor   # TradeExecutorAgent for closing positions
+        # Tracks when each position was last analyzed: ticker -> monotonic timestamp
+        self._last_analyzed: dict[str, float] = {}
+
+    def record_analysis(self, ticker: str) -> None:
+        """Call this whenever a position is (re-)analyzed to reset the stale timer."""
+        self._last_analyzed[ticker] = time.monotonic()
+
+    def _check_stale_positions(self, positions: list[dict]) -> None:
+        """Warn about positions that haven't been re-analyzed in >1 hour."""
+        now = time.monotonic()
+        for pos in positions:
+            ticker = pos["ticker"]
+            last = self._last_analyzed.get(ticker)
+            if last is None:
+                # Never recorded — flag as stale from position open time
+                log.warning(
+                    "stale_position_never_analyzed",
+                    ticker=ticker,
+                    side=pos.get("side"),
+                    contracts=pos.get("contracts"),
+                )
+            elif (now - last) > STALE_ANALYSIS_THRESHOLD_SECONDS:
+                age_minutes = round((now - last) / 60)
+                log.warning(
+                    "stale_position_needs_reanalysis",
+                    ticker=ticker,
+                    side=pos.get("side"),
+                    contracts=pos.get("contracts"),
+                    age_minutes=age_minutes,
+                )
 
     async def run(self, check_interval: int = 120):
         """Continuously monitor all open positions."""
@@ -83,6 +117,7 @@ class PortfolioMonitorAgent(BaseAgent):
             return []
 
         log.info("monitor_checking", count=len(positions))
+        self._check_stale_positions(positions)
         tasks = [self._check_position(p) for p in positions]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 

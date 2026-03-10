@@ -16,7 +16,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from agents.base_agent import BaseAgent, FAST_MODEL, ANALYST_MODEL
-from data.news_feed import NewsFeeed, Article
+from data.news_feed import NewsFeed, Article
 import structlog
 
 log = structlog.get_logger()
@@ -68,7 +68,7 @@ _ANALYZE_SEMAPHORE = asyncio.Semaphore(2)
 
 
 class NewsAnalyzerAgent(BaseAgent):
-    def __init__(self, news: NewsFeeed, open_markets: list[dict] | None = None):
+    def __init__(self, news: NewsFeed, open_markets: list[dict] | None = None):
         super().__init__("NewsAnalyzer", model=FAST_MODEL)
         self.news = news
         self.open_markets = open_markets or []
