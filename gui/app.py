@@ -4,6 +4,7 @@ Kalshi AI Hedge Fund - Web Interface
 Run with: streamlit run gui/app.py
 """
 import os
+import re
 import sys
 import json
 import asyncio
@@ -11,6 +12,8 @@ import subprocess
 import threading
 import queue
 from datetime import datetime
+
+_ANSI_ESCAPE = re.compile(r'\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 # Thread-safe queue for background threads to write log lines into
 _log_queue: queue.Queue = queue.Queue()
@@ -117,7 +120,7 @@ def start_trading(dry_run: bool):
         cmd = [sys.executable, "main.py"]
         if not dry_run:
             cmd.append("--live")
-        env_unbuf = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        env_unbuf = {**os.environ, "PYTHONUNBUFFERED": "1", "NO_COLOR": "1"}
         st.session_state.trading_process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -129,7 +132,9 @@ def start_trading(dry_run: bool):
         proc = st.session_state.trading_process
         def read_output(p=proc):
             for line in p.stdout:
-                _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {line.rstrip()}")
+                clean = _ANSI_ESCAPE.sub('', line.rstrip())
+                if clean:
+                    _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {clean}")
         threading.Thread(target=read_output, daemon=True).start()
 
 def stop_trading():
@@ -252,7 +257,7 @@ with col2:
 with col3:
     if st.button("🔄 Scan Markets", type="secondary", disabled=is_scanning()):
         st.session_state.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] --- Starting market scan ---")
-        env_unbuf = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        env_unbuf = {**os.environ, "PYTHONUNBUFFERED": "1", "NO_COLOR": "1"}
         scan_proc = subprocess.Popen(
             [sys.executable, "main.py", "--scan"],
             stdout=subprocess.PIPE,
@@ -264,7 +269,9 @@ with col3:
         st.session_state.scan_process = scan_proc
         def read_scan_output():
             for line in scan_proc.stdout:
-                _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {line.rstrip()}")
+                clean = _ANSI_ESCAPE.sub('', line.rstrip())
+                if clean:
+                    _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {clean}")
             scan_proc.wait()
             _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] --- Scan complete ---")
         threading.Thread(target=read_scan_output, daemon=True).start()

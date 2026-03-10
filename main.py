@@ -17,11 +17,12 @@ import logging
 # Allow running from inside a Claude Code terminal (claude-agent-sdk blocks nested sessions)
 os.environ.pop("CLAUDECODE", None)
 
-# Configure structured logging
+# Configure structured logging (respect NO_COLOR for GUI subprocess)
+_use_colors = os.environ.get("NO_COLOR", "") == "" and os.isatty(1)
 structlog.configure(
     wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
     processors=[
-        structlog.dev.ConsoleRenderer(colors=True),
+        structlog.dev.ConsoleRenderer(colors=_use_colors),
     ],
 )
 log = structlog.get_logger()
@@ -47,46 +48,36 @@ async def run_scan():
     from agents.market_scanner import MarketScannerAgent
     from agents.probability_analyst import ProbabilityAnalystAgent
     from data.news_feed import NewsFeeed
-    from rich.console import Console
-    from rich.table import Table
 
-    console = Console()
     async with KalshiClient() as kalshi, NewsFeeed() as news:
         scanner = MarketScannerAgent(kalshi)
         analyst = ProbabilityAnalystAgent(kalshi, news)
 
-        console.print("[bold blue]Scanning markets...[/bold blue]")
+        print("Scanning markets...")
         candidates = await scanner.scan()
         top = candidates[:10]
-        console.print(f"[green]Found {len(candidates)} candidates — analysing {len(top)} in parallel...[/green]")
+        print(f"Found {len(candidates)} candidates — analysing {len(top)} in parallel...")
 
         estimates = await asyncio.gather(
             *[analyst.analyze(m) for m in top],
             return_exceptions=True,
         )
 
-        table = Table(title="Top Opportunities", show_lines=True)
-        table.add_column("Ticker", style="cyan")
-        table.add_column("Title")
-        table.add_column("Market %", justify="right")
-        table.add_column("True %", justify="right")
-        table.add_column("Edge", justify="right")
-        table.add_column("Confidence", justify="right")
-
+        print("")
+        print(f"{'Ticker':<25} {'Title':<35} {'Mkt%':>6} {'True%':>6} {'Edge':>6} {'Conf':>5}")
+        print("-" * 90)
         for estimate in estimates:
             if isinstance(estimate, Exception) or estimate is None:
                 continue
-            edge_color = "green" if estimate.edge_pct > 0 else "red"
-            table.add_row(
-                estimate.ticker,
-                estimate.market_title[:40],
-                f"{estimate.market_price_pct:.1f}%",
-                f"{estimate.true_prob_pct:.1f}%",
-                f"[{edge_color}]{estimate.edge_pct:+.1f}%[/{edge_color}]",
-                f"{estimate.confidence:.2f}",
+            print(
+                f"{estimate.ticker:<25} "
+                f"{estimate.market_title[:34]:<35} "
+                f"{estimate.market_price_pct:>5.1f}% "
+                f"{estimate.true_prob_pct:>5.1f}% "
+                f"{estimate.edge_pct:>+5.1f}% "
+                f"{estimate.confidence:>5.2f}"
             )
-
-        console.print(table)
+        print("")
 
 
 async def run_trading(dry_run: bool):
