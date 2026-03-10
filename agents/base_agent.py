@@ -17,9 +17,9 @@ log = structlog.get_logger()
 ANALYST_MODEL = "claude-opus-4-6"
 FAST_MODEL = "claude-haiku-4-5"
 
-# Anthropic models
-ANTHROPIC_FAST_MODEL = "claude-haiku-4-2025-01-15"
-ANTHROPIC_ANALYST_MODEL = "claude-sonnet-4-20250514"  # stay under 20/day limit
+# Anthropic models (fallback when Claude Code CLI is unavailable)
+ANTHROPIC_FAST_MODEL = "claude-haiku-4-5"
+ANTHROPIC_ANALYST_MODEL = "claude-sonnet-4-6"
 
 
 class BaseAgent:
@@ -100,7 +100,7 @@ asyncio.run(run())
                 capture_output=True,
                 text=True,
                 env=clean_env,
-                timeout=60
+                timeout=120
             )
 
         try:

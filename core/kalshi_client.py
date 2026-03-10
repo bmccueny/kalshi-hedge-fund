@@ -3,19 +3,40 @@ Kalshi REST API client.
 Docs: https://trading-api.kalshi.com/trade-api/v2/redoc
 """
 import asyncio
+import base64
+import os
+import time
 from typing import Any
 import httpx
-from config.settings import KALSHI_API_KEY, KALSHI_API_SECRET, KALSHI_BASE_URL
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from config.settings import KALSHI_API_KEY, KALSHI_BASE_URL
 import structlog
 
 log = structlog.get_logger()
+
+# Load RSA private key for request signing
+_RSA_KEY_PATH = os.getenv("KALSHI_RSA_KEY_PATH", "./kalshi_rsa_key.pem")
+_rsa_private_key = None
+
+def _load_rsa_key():
+    global _rsa_private_key
+    if _rsa_private_key is None:
+        path = _RSA_KEY_PATH
+        if not os.path.isabs(path):
+            path = os.path.join(os.path.dirname(os.path.dirname(__file__)), path.lstrip("./"))
+        try:
+            with open(path, "rb") as f:
+                _rsa_private_key = serialization.load_pem_private_key(f.read(), password=None)
+        except Exception as e:
+            log.warning("kalshi_rsa_key_load_failed", error=str(e))
+    return _rsa_private_key
 
 
 class KalshiClient:
     def __init__(self):
         self.base_url = KALSHI_BASE_URL
         self.api_key = KALSHI_API_KEY
-        self.api_secret = KALSHI_API_SECRET
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self):
@@ -26,9 +47,27 @@ class KalshiClient:
         if self._client:
             await self._client.aclose()
 
-    def _auth_headers(self, content_type: bool = False) -> dict[str, str]:
-        """Bearer token auth headers for Kalshi API."""
-        h = {"Authorization": f"Bearer {self.api_key}"}
+    def _auth_headers(self, method: str, path: str, content_type: bool = False) -> dict[str, str]:
+        """RSA-signed auth headers for Kalshi API."""
+        ts_ms = str(int(time.time() * 1000))
+        # Path must be just the endpoint portion, e.g. /trade-api/v2/portfolio/balance
+        base_path = "/trade-api/v2"
+        full_path = base_path + path if not path.startswith(base_path) else path
+
+        private_key = _load_rsa_key()
+        if private_key:
+            msg = f"{ts_ms}{method.upper()}{full_path}"
+            sig = private_key.sign(msg.encode(), padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.MAX_LENGTH), hashes.SHA256())
+            sig_b64 = base64.b64encode(sig).decode()
+            h = {
+                "KALSHI-ACCESS-KEY": self.api_key,
+                "KALSHI-ACCESS-SIGNATURE": sig_b64,
+                "KALSHI-ACCESS-TIMESTAMP": ts_ms,
+            }
+        else:
+            # Fallback to Bearer token
+            h = {"Authorization": f"Bearer {self.api_key}"}
+
         if content_type:
             h["Content-Type"] = "application/json"
         return h
@@ -54,7 +93,7 @@ class KalshiClient:
         raise RuntimeError(f"Kalshi request failed after {max_retries} retries")
 
     async def _get(self, path: str, params: dict | None = None) -> Any:
-        headers = self._auth_headers()
+        headers = self._auth_headers("GET", path)
         return await self._request_with_retry(
             lambda: self._client.get(path, headers=headers, params=params)
         )
@@ -62,13 +101,13 @@ class KalshiClient:
     async def _post(self, path: str, body: dict) -> Any:
         import json
         payload = json.dumps(body)
-        headers = self._auth_headers(content_type=True)
+        headers = self._auth_headers("POST", path, content_type=True)
         return await self._request_with_retry(
             lambda: self._client.post(path, headers=headers, content=payload)
         )
 
     async def _delete(self, path: str) -> Any:
-        headers = self._auth_headers()
+        headers = self._auth_headers("DELETE", path)
         return await self._request_with_retry(
             lambda: self._client.delete(path, headers=headers)
         )

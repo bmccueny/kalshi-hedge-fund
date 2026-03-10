@@ -5,3 +5,4 @@ __pycache__/
 *.pyo
 data/trading.db
 gui_config.json
+kalshi_rsa_key.pem
