@@ -12,11 +12,14 @@ This agent:
 4. Returns a confidence-weighted ProbabilityEstimate with edge vs market price
 """
 import json
+import time
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 from agents.base_agent import BaseAgent
 from core.kalshi_client import KalshiClient
-from data.news_feed import NewsFeeed
+from data.news_feed import NewsFeed
+from config.settings import DAILY_AI_COST_LIMIT_USD
 import structlog
 
 log = structlog.get_logger()
@@ -73,15 +76,59 @@ OUTPUT FORMAT (valid JSON, nothing else outside the JSON block):
 
 
 class ProbabilityAnalystAgent(BaseAgent):
-    def __init__(self, kalshi: KalshiClient, news: "NewsFeeed | None" = None):
+    # Approximate cost per AI call: ~2000 input + ~500 output tokens with Opus
+    # $15/M input + $75/M output ≈ $0.068 per call
+    _COST_PER_CALL_USD = 0.068
+
+    def __init__(self, kalshi: KalshiClient, news: "NewsFeed | None" = None):
         super().__init__("ProbabilityAnalyst")
         self.kalshi = kalshi
         self.news = news
+        # In-memory cache: ticker -> (ProbabilityEstimate, cached_at timestamp)
+        self._cache: dict[str, tuple["ProbabilityEstimate", float]] = {}
+        self._cache_ttl = 600  # 10 minutes
+        # Daily cost tracking
+        self._daily_cost_usd = 0.0
+        self._cost_date = ""  # YYYY-MM-DD of current spend bucket
+
+    def _get_cached(self, ticker: str) -> "ProbabilityEstimate | None":
+        if ticker in self._cache:
+            estimate, cached_at = self._cache[ticker]
+            if time.monotonic() - cached_at < self._cache_ttl:
+                return estimate
+            del self._cache[ticker]
+        return None
+
+    def _set_cached(self, ticker: str, estimate: "ProbabilityEstimate") -> None:
+        self._cache[ticker] = (estimate, time.monotonic())
+
+    def _check_cost_limit(self) -> bool:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        if today != self._cost_date:
+            self._daily_cost_usd = 0.0
+            self._cost_date = today
+        return self._daily_cost_usd < DAILY_AI_COST_LIMIT_USD
 
     async def analyze(self, market: dict) -> "ProbabilityEstimate | None":
         ticker = market["ticker"]
         yes_ask = market.get("yes_ask", 50)
         market_prob = yes_ask  # cents = implied probability %
+
+        # Return cached result if fresh (avoids redundant AI calls)
+        cached = self._get_cached(ticker)
+        if cached is not None:
+            log.info("analyst_cache_hit", ticker=ticker,
+                     age_seconds=round(time.monotonic() - self._cache[ticker][1]))
+            return cached
+
+        # Enforce daily AI spend cap
+        if not self._check_cost_limit():
+            log.warning(
+                "analyst_daily_cost_limit_reached",
+                daily_cost_usd=round(self._daily_cost_usd, 3),
+                limit_usd=DAILY_AI_COST_LIMIT_USD,
+            )
+            return None
 
         log.info("analyst_start", ticker=ticker, market_prob=market_prob)
 
@@ -137,12 +184,18 @@ Based on all of the above, provide your calibrated probability estimate in the r
             log.warning("analyst_empty_result", ticker=ticker)
             return None
 
+        # Charge estimated cost for this call
+        self._daily_cost_usd += self._COST_PER_CALL_USD
+        log.debug("analyst_cost_update",
+                  call_cost=self._COST_PER_CALL_USD,
+                  daily_total=round(self._daily_cost_usd, 3))
+
         try:
             data = self._extract_json(result)
             true_prob = float(data["true_prob_pct"])
             edge = true_prob - market_prob
 
-            return ProbabilityEstimate(
+            estimate = ProbabilityEstimate(
                 ticker=ticker,
                 market_title=market.get("title", ticker),
                 market_price_pct=market_prob,
@@ -155,6 +208,8 @@ Based on all of the above, provide your calibrated probability estimate in the r
                 recommended_side=data.get("recommended_side"),
                 recommended_size_pct=float(data.get("kelly_fraction", 0.25)),
             )
+            self._set_cached(ticker, estimate)
+            return estimate
         except (KeyError, ValueError, json.JSONDecodeError) as e:
             log.error("analyst_parse_error", ticker=ticker, error=str(e), result=result[:500])
             return None

@@ -13,11 +13,20 @@ NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY", "")
 
 # Risk limits
-MAX_POSITION_SIZE_USD = float(os.environ.get("MAX_POSITION_SIZE_USD", "100"))
+# Total account capital — drives all position sizing
+TOTAL_CAPITAL_USD = float(os.environ.get("TOTAL_CAPITAL_USD", "1000"))
+# Maximum USD at risk in any single market position
+MAX_POSITION_SIZE_USD = float(os.environ.get("MAX_POSITION_SIZE_USD", "50"))
+# Maximum fraction of capital deployed across all open positions simultaneously
 MAX_PORTFOLIO_HEAT_PCT = float(os.environ.get("MAX_PORTFOLIO_HEAT_PCT", "0.20"))
+# Maximum fraction of capital in any single market (concentration cap)
 MAX_SINGLE_MARKET_PCT = float(os.environ.get("MAX_SINGLE_MARKET_PCT", "0.05"))
+# Stop all trading for the day if realized losses exceed this amount
 DAILY_LOSS_LIMIT_USD = float(os.environ.get("DAILY_LOSS_LIMIT_USD", "50"))
-TOTAL_CAPITAL_USD = float(os.environ.get("TOTAL_CAPITAL_USD", "200"))
+
+# AI cost controls
+# Approximate USD cap on AI API calls per day (based on token estimates)
+DAILY_AI_COST_LIMIT_USD = float(os.environ.get("DAILY_AI_COST_LIMIT_USD", "10.0"))
 
 # Trading mode - set to False to enable live trading
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "false"
