@@ -32,5 +32,5 @@ FAST_MODEL = "claude-haiku-4-5"         # High-throughput — news triage, quick
 # Scanning
 SCAN_INTERVAL_SECONDS = 60
 MIN_EDGE_THRESHOLD = 0.04               # Minimum probability edge to consider trading (4%)
-MIN_LIQUIDITY_USD = 5000                # Minimum open interest to trade into (higher = fewer markets = faster)
+MIN_LIQUIDITY_USD = 500                 # Minimum open interest to trade into (higher = fewer markets = faster)
 MIN_SPREAD_PCT = 0.02                   # Skip markets with spread > 2% (bad liquidity)

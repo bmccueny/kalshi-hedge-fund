@@ -204,7 +204,7 @@ class KalshiClient:
 
     # ── Paginated helpers ──────────────────────────────────────────────────────
 
-    async def get_all_open_markets(self, max_event_pages: int = 1) -> list[dict]:
+    async def get_all_open_markets(self, max_event_pages: int = 2) -> list[dict]:
         """
         Fetch real single-event markets via the events endpoint.
         The /markets endpoint is dominated by low-liquidity parlay markets;
