@@ -41,6 +41,27 @@ class TradeExecutorAgent(BaseAgent):
         total_contracts = decision.contracts
         price_cents = decision.price_cents
 
+        # ── Stale signal check ────────────────────────────────────────────────
+        # Re-fetch price; skip if market moved >2% since analysis was done
+        if price_cents > 0:
+            try:
+                current_market = await self.kalshi.get_market(ticker)
+                current_price = current_market.get("market", {}).get(
+                    "yes_ask" if side == "yes" else "no_ask", price_cents
+                )
+                move_pct = abs(current_price - price_cents) / price_cents
+                if move_pct > 0.02:
+                    log.warning(
+                        "stale_signal_skipped",
+                        ticker=ticker,
+                        signal_price=price_cents,
+                        current_price=current_price,
+                        move_pct=round(move_pct * 100, 1),
+                    )
+                    return None
+            except Exception as e:
+                log.warning("stale_check_failed", ticker=ticker, error=str(e))
+
         # ── Pre-execution checks ───────────────────────────────────────────────
         ok = await self._pre_execution_checks(ticker, side, total_contracts, price_cents)
         if not ok:
@@ -182,33 +203,34 @@ class TradeExecutorAgent(BaseAgent):
             return None
 
     async def close_position(self, ticker: str, side: str, contracts: int, reason: str) -> bool:
-        """Exit an existing position at market."""
-        # To close a YES position, sell YES (or buy NO)
-        close_side = "no" if side == "yes" else "yes"
-
+        """Exit an existing position by selling the same side (Kalshi uses action='sell')."""
         if self.dry_run:
-            log.info("DRY_RUN_CLOSE", ticker=ticker, close_side=close_side, contracts=contracts)
+            log.info("DRY_RUN_CLOSE", ticker=ticker, side=side, contracts=contracts)
             await save_trade(
                 order_id=f"close-{uuid.uuid4().hex[:8]}",
-                ticker=ticker, side=close_side, contracts=contracts,
+                ticker=ticker, side=side, contracts=contracts,
                 price_cents=50, action="close", agent="TradeExecutor", reason=reason,
             )
             return True
 
         try:
             market = await self.kalshi.get_market(ticker)
-            if close_side == "yes":
-                price = market.get("market", {}).get("yes_ask", 50)
+            # Sell at the bid (where buyers are waiting)
+            if side == "yes":
+                price = market.get("market", {}).get("yes_bid", 50)
             else:
-                price = market.get("market", {}).get("no_ask", 50)
+                price = market.get("market", {}).get("no_bid", 50)
 
             await self.kalshi.place_order(
-                ticker=ticker, side=close_side, count=contracts,
+                ticker=ticker,
+                side=side,
+                count=contracts,
                 order_type="limit",
-                yes_price=price if close_side == "yes" else None,
-                no_price=price if close_side == "no" else None,
+                action="sell",
+                yes_price=price if side == "yes" else None,
+                no_price=price if side == "no" else None,
             )
-            log.info("position_closed", ticker=ticker, reason=reason)
+            log.info("position_closed", ticker=ticker, side=side, reason=reason)
             return True
         except Exception as e:
             log.error("close_position_failed", ticker=ticker, error=str(e))

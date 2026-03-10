@@ -151,12 +151,13 @@ class KalshiClient:
         yes_price: int | None = None,   # cents (0-100)
         no_price: int | None = None,
         client_order_id: str | None = None,
+        action: str = "buy",            # "buy" to open, "sell" to close
     ) -> dict:
         body: dict = {
             "ticker": ticker,
             "side": side,
             "count": count,
-            "action": "buy",
+            "action": action,
             "type": order_type,
         }
         if yes_price is not None:

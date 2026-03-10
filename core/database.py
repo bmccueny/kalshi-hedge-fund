@@ -132,6 +132,63 @@ async def get_daily_pnl(date: str | None = None) -> dict:
         return dict(row) if row else {"date": date, "realized_pnl_usd": 0, "num_trades": 0}
 
 
+async def reconcile(kalshi_positions: list[dict], kalshi_balance: float) -> dict:
+    """
+    Sync local positions table to match Kalshi's actual state.
+    Called at startup so local DB reflects reality before trading begins.
+    """
+    local_positions = await get_open_positions()
+    local_by_ticker = {p["ticker"]: p for p in local_positions}
+    kalshi_by_ticker = {p["ticker"]: p for p in kalshi_positions if p.get("ticker")}
+
+    discrepancies = []
+
+    # Positions on Kalshi that are missing locally → insert them
+    for ticker, kpos in kalshi_by_ticker.items():
+        if ticker not in local_by_ticker:
+            log.warning("reconcile_missing_local", ticker=ticker,
+                        kalshi_contracts=abs(kpos.get("position", 0)))
+            discrepancies.append({"type": "missing_local", "ticker": ticker})
+            net = kpos.get("position", 0)
+            side = "yes" if net > 0 else "no"
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    """INSERT INTO positions
+                       (ticker, side, contracts, avg_price_cents, opened_at, status)
+                       VALUES (?, ?, ?, ?, ?, 'open')""",
+                    (ticker, side, abs(net),
+                     kpos.get("avg_price", 50),
+                     datetime.utcnow().isoformat()),
+                )
+                await db.commit()
+
+    # Positions open locally but absent from Kalshi → mark closed
+    for ticker, lpos in local_by_ticker.items():
+        if ticker not in kalshi_by_ticker:
+            log.warning("reconcile_stale_local", ticker=ticker)
+            discrepancies.append({"type": "stale_local", "ticker": ticker})
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE positions SET status='closed', closed_at=? WHERE ticker=? AND status='open'",
+                    (datetime.utcnow().isoformat(), ticker),
+                )
+                await db.commit()
+
+    log.info(
+        "reconcile_complete",
+        discrepancies=len(discrepancies),
+        kalshi_positions=len(kalshi_by_ticker),
+        local_positions=len(local_by_ticker),
+        kalshi_balance_cents=kalshi_balance,
+    )
+    return {
+        "discrepancies": discrepancies,
+        "kalshi_balance": kalshi_balance,
+        "local_count": len(local_by_ticker),
+        "kalshi_count": len(kalshi_by_ticker),
+    }
+
+
 async def update_daily_pnl(realized_delta: float, num_trades_delta: int = 1) -> None:
     date = datetime.utcnow().strftime("%Y-%m-%d")
     async with aiosqlite.connect(DB_PATH) as db:

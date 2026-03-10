@@ -13,16 +13,18 @@ Design: all agents run concurrently with asyncio. News analyzer and
 portfolio monitor are background tasks; scanning loop is the main loop.
 """
 import asyncio
+import signal
 import structlog
 from core.kalshi_client import KalshiClient
-from core.database import init_db, save_signal
+from core.database import init_db, save_signal, reconcile
 from agents.market_scanner import MarketScannerAgent
+from agents.market_research import MarketResearchAgent
 from agents.probability_analyst import ProbabilityAnalystAgent
 from agents.risk_manager import RiskManagerAgent
 from agents.trade_executor import TradeExecutorAgent
 from agents.portfolio_monitor import PortfolioMonitorAgent
 from agents.news_analyzer import NewsAnalyzerAgent
-from data.news_feed import NewsFeeed
+from data.news_feed import NewsFeed
 from config.settings import SCAN_INTERVAL_SECONDS, MIN_EDGE_THRESHOLD
 
 log = structlog.get_logger()
@@ -32,14 +34,52 @@ class Orchestrator:
     def __init__(self, dry_run: bool = True):
         self.dry_run = dry_run
         self._open_markets: list[dict] = []
+        self._tasks: list[asyncio.Task] = []
+
+    async def _handle_shutdown(self, sig: signal.Signals) -> None:
+        log.warning("shutdown_signal_received", signal=sig.name)
+        for task in self._tasks:
+            task.cancel()
+        log.info("shutdown_tasks_cancelled", count=len(self._tasks))
+        # Give tasks a moment to cancel cleanly
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        log.info("shutdown_complete")
 
     async def run(self):
         await init_db()
         log.info("orchestrator_start", dry_run=self.dry_run)
 
-        async with KalshiClient() as kalshi, NewsFeeed() as news:
+        # Install signal handlers for graceful shutdown
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(
+                sig,
+                lambda s=sig: asyncio.create_task(self._handle_shutdown(s)),
+            )
+
+        async with KalshiClient() as kalshi, NewsFeed() as news:
+            # ── Startup reconciliation ─────────────────────────────────────
+            try:
+                positions_data = await kalshi.get_positions()
+                balance_data = await kalshi.get_balance()
+                kalshi_positions = positions_data.get("positions", [])
+                kalshi_balance = balance_data.get("balance", 0)
+                recon = await reconcile(kalshi_positions, kalshi_balance)
+                if recon["discrepancies"]:
+                    log.warning(
+                        "startup_reconciliation_discrepancies",
+                        discrepancies=recon["discrepancies"],
+                    )
+                else:
+                    log.info("startup_reconciliation_clean",
+                             positions=recon["kalshi_count"],
+                             balance_cents=kalshi_balance)
+            except Exception as e:
+                log.error("startup_reconciliation_failed", error=str(e))
             executor = TradeExecutorAgent(kalshi, dry_run=self.dry_run)
             scanner = MarketScannerAgent(kalshi)
+            researcher = MarketResearchAgent(kalshi)
             analyst = ProbabilityAnalystAgent(kalshi, news)
             risk_mgr = RiskManagerAgent()
             monitor = PortfolioMonitorAgent(kalshi, executor)
@@ -47,9 +87,9 @@ class Orchestrator:
 
             # Wire news signals into re-analysis pipeline
             @news_agent.on_signal
-            async def on_news_signal(signal):
-                log.info("news_triggered_reanalysis", tickers=signal.affected_tickers)
-                for ticker in signal.affected_tickers[:3]:  # limit concurrent re-analyses
+            async def on_news_signal(news_signal):
+                log.info("news_triggered_reanalysis", tickers=news_signal.affected_tickers)
+                for ticker in news_signal.affected_tickers[:3]:  # limit concurrent re-analyses
                     try:
                         market_data = await kalshi.get_market(ticker)
                         market = market_data.get("market", {})
@@ -61,17 +101,21 @@ class Orchestrator:
                     except Exception as e:
                         log.error("news_reanalysis_error", ticker=ticker, error=str(e))
 
-            # Start background tasks
-            tasks = [
+            # Start background tasks (stored on self so shutdown handler can cancel them)
+            self._tasks = [
                 asyncio.create_task(monitor.run(check_interval=120)),
                 asyncio.create_task(news_agent.run(poll_interval=60)),
+                asyncio.create_task(self._research_loop(kalshi, researcher)),
                 asyncio.create_task(self._main_scan_loop(
                     kalshi, scanner, analyst, risk_mgr, executor
                 )),
             ]
 
             log.info("all_agents_started")
-            await asyncio.gather(*tasks)
+            try:
+                await asyncio.gather(*self._tasks)
+            except asyncio.CancelledError:
+                log.info("orchestrator_tasks_cancelled")
 
     async def _main_scan_loop(
         self,
@@ -137,3 +181,27 @@ class Orchestrator:
             decision = await risk_mgr.evaluate(estimate, market)
             if decision.approved:
                 await executor.execute(decision)
+
+    async def _research_loop(
+        self,
+        kalshi: KalshiClient,
+        researcher: MarketResearchAgent,
+    ):
+        """Periodically run market research."""
+        import time
+        RESEARCH_INTERVAL = 3600  # every hour
+        
+        while True:
+            try:
+                log.info("research_loop_start")
+                result = await researcher.research(max_markets=200)
+                log.info(
+                    "research_complete",
+                    categories=len(result.get("categories", {})),
+                    anomalies=len(result.get("detected_anomalies", [])),
+                    trends=len(result.get("cross_market_trends", [])),
+                )
+            except Exception as e:
+                log.error("research_loop_error", error=str(e))
+            
+            await asyncio.sleep(RESEARCH_INTERVAL)
