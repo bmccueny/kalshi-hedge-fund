@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import json
+import signal
 import asyncio
 import subprocess
 import threading
@@ -192,6 +193,7 @@ def start_trading(dry_run: bool):
             text=True,
             bufsize=1,
             env=env_unbuf,
+            preexec_fn=os.setsid,  # own process group so we can kill all children
         )
         proc = st.session_state.trading_process
         def read_output(p=proc):
@@ -212,12 +214,18 @@ def start_trading(dry_run: bool):
 def stop_trading():
     proc = st.session_state.trading_process
     if proc:
-        proc.terminate()
         try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=2)
+            # Kill entire process group (parent + all children)
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
+                proc.wait(timeout=2)
+        except (ProcessLookupError, OSError):
+            # Already dead
+            pass
         st.session_state.trading_process = None
         _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] --- Trading stopped ---")
 
