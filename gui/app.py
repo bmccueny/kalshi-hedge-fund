@@ -112,12 +112,63 @@ def fetch_kalshi_fills():
     except Exception as e:
         return []
 
+
+def run_market_scan():
+    """Run market scan in-process and return structured results."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+        from core.kalshi_client import KalshiClient
+        from agents.market_scanner import MarketScannerAgent
+        from agents.probability_analyst import ProbabilityAnalystAgent
+        from data.news_feed import NewsFeed
+
+        async def _scan():
+            async with KalshiClient() as kalshi, NewsFeed() as news:
+                scanner = MarketScannerAgent(kalshi)
+                analyst = ProbabilityAnalystAgent(kalshi, news)
+
+                _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning markets...")
+                candidates = await scanner.scan()
+                top = candidates[:10]
+                _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Found {len(candidates)} candidates — analysing top {len(top)}...")
+
+                estimates = await asyncio.gather(
+                    *[analyst.analyze(m) for m in top],
+                    return_exceptions=True,
+                )
+
+                results = []
+                for est in estimates:
+                    if isinstance(est, Exception) or est is None:
+                        continue
+                    results.append({
+                        "ticker": est.ticker,
+                        "title": est.market_title,
+                        "market_pct": est.market_price_pct,
+                        "true_pct": est.true_prob_pct,
+                        "edge_pct": est.edge_pct,
+                        "confidence": est.confidence,
+                        "side": est.recommended_side,
+                        "risks": est.key_risks,
+                        "rationale": est.rationale,
+                    })
+
+                _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Scan complete — {len(results)} estimates produced")
+                return results
+
+        return asyncio.run(_scan())
+    except Exception as e:
+        _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Scan error: {e}")
+        return None
+
 # ── Session state ───────────────────────────────────────────────────────────
 
 if "trading_process" not in st.session_state:
     st.session_state.trading_process = None
-if "scan_process" not in st.session_state:
-    st.session_state.scan_process = None
+if "scan_results" not in st.session_state:
+    st.session_state.scan_results = None
+if "scan_running" not in st.session_state:
+    st.session_state.scan_running = False
 if "logs" not in st.session_state:
     st.session_state.logs = []
 
@@ -152,7 +203,7 @@ def is_trading():
     return st.session_state.trading_process is not None and st.session_state.trading_process.poll() is None
 
 def is_scanning():
-    return st.session_state.scan_process is not None and st.session_state.scan_process.poll() is None
+    return st.session_state.scan_running
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────
 
@@ -263,24 +314,12 @@ with col2:
 with col3:
     if st.button("🔄 Scan Markets", type="secondary", disabled=is_scanning()):
         st.session_state.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] --- Starting market scan ---")
-        env_unbuf = {**os.environ, "PYTHONUNBUFFERED": "1", "NO_COLOR": "1"}
-        scan_proc = subprocess.Popen(
-            [sys.executable, "main.py", "--scan"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env_unbuf,
-        )
-        st.session_state.scan_process = scan_proc
-        def read_scan_output():
-            for line in scan_proc.stdout:
-                clean = _ANSI_ESCAPE.sub('', line.rstrip())
-                if clean:
-                    _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {clean}")
-            scan_proc.wait()
-            _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] --- Scan complete ---")
-        threading.Thread(target=read_scan_output, daemon=True).start()
+        st.session_state.scan_running = True
+        with st.spinner("Scanning markets & running AI analysis..."):
+            results = run_market_scan()
+        st.session_state.scan_running = False
+        if results is not None:
+            st.session_state.scan_results = results
         st.rerun()
 
 # ── Live Logs ───────────────────────────────────────────────────────────────
@@ -309,6 +348,108 @@ def live_logs_fragment():
         st.caption(status_label)
 
 live_logs_fragment()
+
+# ── Scan Results ────────────────────────────────────────────────────────────
+
+st.divider()
+st.subheader("🔍 Scan Results")
+
+if st.session_state.scan_results is None:
+    st.info("No scan results yet — click **Scan Markets** above to find opportunities.")
+elif len(st.session_state.scan_results) == 0:
+    st.warning("Scan completed but found no tradeable opportunities.")
+else:
+    scan_data = st.session_state.scan_results
+
+    # Summary metrics row
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    avg_edge = sum(abs(r["edge_pct"]) for r in scan_data) / len(scan_data)
+    avg_conf = sum(r["confidence"] for r in scan_data) / len(scan_data)
+    buy_yes = sum(1 for r in scan_data if r.get("side") == "yes")
+    buy_no = sum(1 for r in scan_data if r.get("side") == "no")
+    with sc1:
+        st.metric("Opportunities", len(scan_data))
+    with sc2:
+        st.metric("Avg Edge", f"{avg_edge:+.1f}%")
+    with sc3:
+        st.metric("Avg Confidence", f"{avg_conf:.0%}")
+    with sc4:
+        st.metric("YES / NO", f"{buy_yes} / {buy_no}")
+
+    # Build table rows
+    scan_rows = []
+    for r in scan_data:
+        side = (r.get("side") or "—").upper()
+        scan_rows.append({
+            "Ticker": r["ticker"],
+            "Title": r["title"][:45],
+            "Side": side,
+            "Market %": f"{r['market_pct']:.1f}%",
+            "True %": f"{r['true_pct']:.1f}%",
+            "Edge": f"{r['edge_pct']:+.1f}%",
+            "Confidence": f"{r['confidence']:.0%}",
+        })
+
+    scan_df = pd.DataFrame(scan_rows)
+
+    def color_edge(val):
+        """Green for positive edge, red for negative."""
+        try:
+            num = float(val.replace("%", "").replace("+", ""))
+        except (ValueError, AttributeError):
+            return ""
+        if num > 5:
+            return "color: #22c55e; font-weight: bold"
+        elif num > 0:
+            return "color: #4ade80"
+        elif num < -5:
+            return "color: #ef4444; font-weight: bold"
+        elif num < 0:
+            return "color: #f87171"
+        return ""
+
+    def color_confidence(val):
+        """Green gradient based on confidence level."""
+        try:
+            num = float(val.replace("%", "")) / 100
+        except (ValueError, AttributeError):
+            return ""
+        if num >= 0.7:
+            return "color: #22c55e; font-weight: bold"
+        elif num >= 0.5:
+            return "color: #facc15"
+        else:
+            return "color: #f87171"
+
+    def color_side(val):
+        if val == "YES":
+            return "color: #22c55e; font-weight: bold"
+        elif val == "NO":
+            return "color: #ef4444; font-weight: bold"
+        return "color: #6b7280"
+
+    styled = scan_df.style.map(color_edge, subset=["Edge"]) \
+                          .map(color_confidence, subset=["Confidence"]) \
+                          .map(color_side, subset=["Side"])
+
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # Expandable rationale details
+    with st.expander("📝 Detailed Analysis", expanded=False):
+        for r in scan_data:
+            side_label = (r.get("side") or "none").upper()
+            edge_sign = "+" if r["edge_pct"] > 0 else ""
+            st.markdown(f"**{r['ticker']}** — {r['title']}")
+            st.markdown(
+                f"&nbsp;&nbsp;&nbsp;&nbsp;Edge: `{edge_sign}{r['edge_pct']:.1f}%` · "
+                f"Confidence: `{r['confidence']:.0%}` · "
+                f"Side: `{side_label}`"
+            )
+            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;*{r.get('rationale', 'N/A')[:300]}*")
+            risks = r.get("risks", [])
+            if risks:
+                st.markdown("&nbsp;&nbsp;&nbsp;&nbsp;Risks: " + ", ".join(f"`{rk}`" for rk in risks[:3]))
+            st.markdown("---")
 
 # ── Open Positions ──────────────────────────────────────────────────────────
 

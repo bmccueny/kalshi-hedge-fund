@@ -16,7 +16,7 @@ import time
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
-from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent, cost_tracker
 from core.kalshi_client import KalshiClient
 from data.news_feed import NewsFeed
 from config.settings import DAILY_AI_COST_LIMIT_USD
@@ -76,20 +76,13 @@ OUTPUT FORMAT (valid JSON, nothing else outside the JSON block):
 
 
 class ProbabilityAnalystAgent(BaseAgent):
-    # Approximate cost per AI call: ~2000 input + ~500 output tokens with Opus
-    # $15/M input + $75/M output ≈ $0.068 per call
-    _COST_PER_CALL_USD = 0.068
-
     def __init__(self, kalshi: KalshiClient, news: "NewsFeed | None" = None):
         super().__init__("ProbabilityAnalyst")
         self.kalshi = kalshi
         self.news = news
         # In-memory cache: ticker -> (ProbabilityEstimate, cached_at timestamp)
         self._cache: dict[str, tuple["ProbabilityEstimate", float]] = {}
-        self._cache_ttl = 600  # 10 minutes
-        # Daily cost tracking
-        self._daily_cost_usd = 0.0
-        self._cost_date = ""  # YYYY-MM-DD of current spend bucket
+        self._cache_ttl = 1200  # 20 minutes (increased from 10 for cost savings)
 
     def _get_cached(self, ticker: str) -> "ProbabilityEstimate | None":
         if ticker in self._cache:
@@ -103,11 +96,8 @@ class ProbabilityAnalystAgent(BaseAgent):
         self._cache[ticker] = (estimate, time.monotonic())
 
     def _check_cost_limit(self) -> bool:
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        if today != self._cost_date:
-            self._daily_cost_usd = 0.0
-            self._cost_date = today
-        return self._daily_cost_usd < DAILY_AI_COST_LIMIT_USD
+        """Check global AI spend limit (centralized across all agents)."""
+        return cost_tracker.check_limit(DAILY_AI_COST_LIMIT_USD)
 
     async def analyze(self, market: dict) -> "ProbabilityEstimate | None":
         ticker = market["ticker"]
@@ -121,12 +111,13 @@ class ProbabilityAnalystAgent(BaseAgent):
                      age_seconds=round(time.monotonic() - self._cache[ticker][1]))
             return cached
 
-        # Enforce daily AI spend cap
+        # Enforce daily AI spend cap (centralized across all agents)
         if not self._check_cost_limit():
             log.warning(
                 "analyst_daily_cost_limit_reached",
-                daily_cost_usd=round(self._daily_cost_usd, 3),
+                daily_cost_usd=round(cost_tracker.daily_total_usd, 3),
                 limit_usd=DAILY_AI_COST_LIMIT_USD,
+                per_agent=cost_tracker.per_agent,
             )
             return None
 
@@ -154,7 +145,32 @@ class ProbabilityAnalystAgent(BaseAgent):
         if not isinstance(news_articles, list):
             news_articles = []
 
-        # Build comprehensive prompt with all context embedded
+        # Build comprehensive prompt with trimmed context (only fields relevant to probability estimation)
+        # Price history: only yes_price and timestamp (drop all other Kalshi API fields)
+        raw_history = (history.get("history", []) if isinstance(history, dict)
+                       else history if isinstance(history, list) else [])
+        trimmed_history = [
+            {"t": p.get("ts", p.get("end_period_ts", "")), "yes": p.get("yes_price")}
+            for p in raw_history[:50]
+            if p.get("yes_price") is not None
+        ]
+
+        # News: only title, source, short body, and date (drop URLs, IDs, metadata)
+        trimmed_news = [
+            {"title": a.get("title", ""), "source": a.get("source", ""),
+             "body": a.get("description", a.get("body", ""))[:200],
+             "date": a.get("publishedAt", a.get("published_at", ""))}
+            for a in news_articles[:8]
+        ]
+
+        # Related markets: only ticker, title, and price (drop full API response objects)
+        raw_related = (related_data.get("markets", []) if isinstance(related_data, dict) else [])
+        trimmed_related = [
+            {"ticker": r.get("ticker"), "title": r.get("title", "")[:80],
+             "yes_price": r.get("yes_ask", r.get("last_price"))}
+            for r in raw_related[:10]
+        ]
+
         prompt = f"""Analyze this Kalshi prediction market:
 
 ## Market Details
@@ -166,14 +182,14 @@ Close time: {market.get('close_time', 'N/A')}
 Volume (total): ${market.get('volume', 0)/100:.2f}
 Open interest: ${market.get('open_interest', 0)/100:.2f}
 
-## Price History (most recent 50 data points)
-{json.dumps(history[:50] if isinstance(history, list) else [], indent=2)}
+## Price History (recent, t=timestamp, yes=YES price in cents)
+{json.dumps(trimmed_history)}
 
 ## Recent News (last 7 days)
-{json.dumps([{"title": a.get("title", ""), "source": a.get("source", ""), "body": a.get("description", "")[:300], "published": a.get("publishedAt", "")} for a in news_articles[:8]], indent=2)}
+{json.dumps(trimmed_news)}
 
 ## Related Markets
-{json.dumps((related_data.get("markets", []) if isinstance(related_data, dict) else [])[:10], indent=2)}
+{json.dumps(trimmed_related)}
 
 Based on all of the above, provide your calibrated probability estimate in the required JSON format."""
 
@@ -184,11 +200,10 @@ Based on all of the above, provide your calibrated probability estimate in the r
             log.warning("analyst_empty_result", ticker=ticker)
             return None
 
-        # Charge estimated cost for this call
-        self._daily_cost_usd += self._COST_PER_CALL_USD
+        # Cost is tracked automatically by BaseAgent.analyze() via cost_tracker
         log.debug("analyst_cost_update",
-                  call_cost=self._COST_PER_CALL_USD,
-                  daily_total=round(self._daily_cost_usd, 3))
+                  daily_total=round(cost_tracker.daily_total_usd, 3),
+                  per_agent=cost_tracker.per_agent)
 
         try:
             data = self._extract_json(result)

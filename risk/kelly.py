@@ -85,7 +85,7 @@ def compute_position_size(
 
 def contracts_from_usd(amount_usd: float, price_cents: int) -> int:
     """Convert dollar amount to number of Kalshi contracts."""
-    if price_cents <= 0:
+    if price_cents <= 0 or amount_usd <= 0:
         return 0
     price_dollars = price_cents / 100
     return max(1, int(amount_usd / price_dollars))

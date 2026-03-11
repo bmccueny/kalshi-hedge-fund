@@ -52,7 +52,7 @@ async def test_all():
         # Kalshi — try public endpoint, then authenticated
         try:
             r = await client.get(
-                "https://trading-api.kalshi.com/trade-api/v2/markets",
+                "https://api.elections.kalshi.com/trade-api/v2/markets",
                 params={"limit": 1}
             )
             if r.status_code == 200:
@@ -61,7 +61,7 @@ async def test_all():
                 print(f"Kalshi public: FAIL {r.status_code}: {r.text[:80]}")
 
             r2 = await client.get(
-                "https://trading-api.kalshi.com/trade-api/v2/portfolio/balance",
+                "https://api.elections.kalshi.com/trade-api/v2/portfolio/balance",
                 headers={"Authorization": f"Bearer {KALSHI_KEY}"}
             )
             status = "OK (authenticated)" if r2.status_code == 200 else f"FAIL {r2.status_code}: {r2.text[:80]}"

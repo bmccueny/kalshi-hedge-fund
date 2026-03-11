@@ -4,6 +4,7 @@ Swap in any news provider by implementing the NewsFeed interface.
 Includes fallback to web scraper when rate limited.
 """
 import asyncio
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import time
@@ -212,7 +213,7 @@ class NewsFeed:
         sources = []
         tasks = []
 
-        if NEWS_API_KEY:
+        if NEWS_API_KEY and NEWS_API_KEY.strip():
             tasks.append(self._fetch_newsapi(limit))
         if POLYGON_API_KEY:
             tasks.append(self._fetch_polygon(limit))
@@ -249,7 +250,7 @@ class NewsFeed:
 
     async def search(self, query: str, days_back: int = 7) -> list[dict]:
         """Search for articles relevant to a query."""
-        if not NEWS_API_KEY:
+        if not NEWS_API_KEY or not NEWS_API_KEY.strip():
             if self._use_fallback:
                 return await self._search_fallback(query, days_back)
             return []
@@ -298,7 +299,7 @@ class NewsFeed:
             # Convert to Article objects for saving
             article_objs = [
                 Article(
-                    id=f"search-{hash(a.get('url', ''))}",
+                    id=f"search-{hashlib.md5(a.get('url', '').encode()).hexdigest()[:12]}",
                     title=a.get("title", ""),
                     body=a.get("content") or a.get("description") or "",
                     source=a.get("source", {}).get("name", "NewsAPI"),
@@ -336,7 +337,7 @@ class NewsFeed:
             articles = r.json().get("articles", [])
             return [
                 Article(
-                    id=f"newsapi-{hash(a.get('url', ''))}",
+                    id=f"newsapi-{hashlib.md5(a.get('url', '').encode()).hexdigest()[:12]}",
                     title=a.get("title", ""),
                     body=a.get("content") or a.get("description") or "",
                     source=a.get("source", {}).get("name", "NewsAPI"),
@@ -368,7 +369,7 @@ class NewsFeed:
             results = r.json().get("results", [])
             return [
                 Article(
-                    id=f"polygon-{a.get('id', hash(a.get('article_url', '')))}",
+                    id=f"polygon-{a.get('id', hashlib.md5(a.get('article_url', '').encode()).hexdigest()[:12])}",
                     title=a.get("title", ""),
                     body=a.get("description", ""),
                     source=a.get("publisher", {}).get("name", "Polygon"),

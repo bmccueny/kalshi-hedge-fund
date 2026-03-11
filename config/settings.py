@@ -4,13 +4,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Kalshi
-KALSHI_API_KEY = os.environ["KALSHI_API_KEY"]
+KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY", "")
 KALSHI_API_SECRET = os.environ.get("KALSHI_API_SECRET", "")
 KALSHI_BASE_URL = os.environ.get("KALSHI_BASE_URL", "https://api.elections.kalshi.com/trade-api/v2")
 
 # News
 NEWS_API_KEY = os.environ.get("NEWS_API_KEY", "")
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY", "")
+
+# xAI Grok (fallback)
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
+
+# Anthropic (optional)
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # Risk limits
 # Total account capital — drives all position sizing
@@ -29,14 +35,18 @@ DAILY_LOSS_LIMIT_USD = float(os.environ.get("DAILY_LOSS_LIMIT_USD", "50"))
 DAILY_AI_COST_LIMIT_USD = float(os.environ.get("DAILY_AI_COST_LIMIT_USD", "10.0"))
 
 # Trading mode - set to False to enable live trading
-DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "false"
+DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 
 # DB
 DB_PATH = os.environ.get("DB_PATH", "./data/trading.db")
 
-# Agent models
-ANALYST_MODEL = "claude-opus-4-6"       # Deep reasoning — probability analysis, strategy
-FAST_MODEL = "claude-haiku-4-5"         # High-throughput — news triage, quick classification
+# Agent models — Claude (high-stakes reasoning)
+ANALYST_MODEL = "claude-opus-4-6"  # Deep reasoning — probability analysis, risk review
+FAST_MODEL = "claude-haiku-4-5"    # Claude fast tier (used as fallback)
+
+# Agent models — Grok (high-volume tasks: scanning, triage, monitoring)
+GROK_FAST_MODEL = "grok-3-fast"              # Fast batch scoring, classification
+GROK_ANALYST_MODEL = "grok-4-1-fast-reasoning"  # Deeper Grok reasoning for monitoring/research
 
 # Scanning
 SCAN_INTERVAL_SECONDS = 60

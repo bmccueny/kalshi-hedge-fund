@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build: .
+    container_name: kalshi-trading-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DRY_RUN=true
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - trading-network
+
+  # Optional: Add monitoring stack
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deployment/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - trading-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - trading-network
+
+networks:
+  trading-network:
+    driver: bridge

@@ -93,23 +93,20 @@ class KalshiClient:
         raise RuntimeError(f"Kalshi request failed after {max_retries} retries")
 
     async def _get(self, path: str, params: dict | None = None) -> Any:
-        headers = self._auth_headers("GET", path)
         return await self._request_with_retry(
-            lambda: self._client.get(path, headers=headers, params=params)
+            lambda: self._client.get(path, headers=self._auth_headers("GET", path), params=params)
         )
 
     async def _post(self, path: str, body: dict) -> Any:
         import json
         payload = json.dumps(body)
-        headers = self._auth_headers("POST", path, content_type=True)
         return await self._request_with_retry(
-            lambda: self._client.post(path, headers=headers, content=payload)
+            lambda: self._client.post(path, headers=self._auth_headers("POST", path, content_type=True), content=payload)
         )
 
     async def _delete(self, path: str) -> Any:
-        headers = self._auth_headers("DELETE", path)
         return await self._request_with_retry(
-            lambda: self._client.delete(path, headers=headers)
+            lambda: self._client.delete(path, headers=self._auth_headers("DELETE", path))
         )
 
     # ── Markets ────────────────────────────────────────────────────────────────

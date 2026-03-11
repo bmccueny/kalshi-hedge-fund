@@ -94,8 +94,9 @@ async def build_layout(kalshi: KalshiClient) -> Panel:
     )
 
     from rich.columns import Columns
+    from rich.console import Group
     return Panel(
-        Columns([pos_table]),
+        Group(header, pos_table, stats),
         title="[bold blue]Kalshi AI Hedge Fund[/bold blue]",
         subtitle=f"Daily P&L: [{'green' if daily_pnl >= 0 else 'red'}]{daily_pnl:+.2f}[/{'green' if daily_pnl >= 0 else 'red'}]",
     )

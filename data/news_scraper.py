@@ -84,9 +84,10 @@ class NewsScraper:
         if cached:
             return cached
 
+        # Yahoo search disabled - they changed their API, now returns 404s
+        # Using Bing instead
         tasks = [
-            self._search_yahoo(query, limit // 2),
-            self._search_bing(query, limit // 2),
+            self._search_bing(query, limit),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)

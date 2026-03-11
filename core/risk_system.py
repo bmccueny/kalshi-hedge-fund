@@ -216,6 +216,7 @@ class RiskManager:
         self.daily_high = max(self.daily_high, self.portfolio_value + total_pnl)
         current_value = self.portfolio_value + total_pnl
         
+        drawdown = 0.0
         if self.daily_high > 0:
             drawdown = (self.daily_high - current_value) / self.daily_high * 100
             self.max_drawdown = max(self.max_drawdown, drawdown)

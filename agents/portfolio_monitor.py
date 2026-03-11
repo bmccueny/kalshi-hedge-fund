@@ -17,7 +17,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from agents.base_agent import BaseAgent
+from agents.base_agent import BaseAgent, GROK_ANALYST_MODEL
 from core.kalshi_client import KalshiClient
 from core.database import get_open_positions
 from config.settings import TOTAL_CAPITAL_USD
@@ -66,7 +66,7 @@ STALE_ANALYSIS_THRESHOLD_SECONDS = 3600  # 1 hour
 
 class PortfolioMonitorAgent(BaseAgent):
     def __init__(self, kalshi: KalshiClient, executor=None):
-        super().__init__("PortfolioMonitor")
+        super().__init__("PortfolioMonitor", model=GROK_ANALYST_MODEL, provider="grok")
         self.kalshi = kalshi
         self.executor = executor   # TradeExecutorAgent for closing positions
         # Tracks when each position was last analyzed: ticker -> monotonic timestamp
