@@ -31,10 +31,14 @@ Your job: given a batch of Kalshi markets, score each one for "worthiness of dee
 Score each market 0–10 on:
 - Information edge potential (can we know something the market doesn't?)
 - Liquidity (enough to trade without moving the market)
-- Time-to-resolution fit (prefer 1 day to 3 months)
-- Category (prefer: macro/finance, elections, weather, sports outcomes — avoid trivia)
+- Time-to-resolution fit (prefer 1 day to 3 months, but all timeframes are valid)
 - Trend signals (bullish/bearish trends may indicate momentum or reversal opportunities)
 - Anomaly signals (price spikes, spread anomalies may indicate mispricing)
+
+ALL categories are equally valid opportunities:
+  weather, economics/finance, politics/elections, sports, crypto, tech, entertainment,
+  science, legal, geopolitics, daily events, corporate actions, IPOs, and more.
+DO NOT penalize or prefer any category over another. Judge purely on edge potential.
 
 Return ONLY a JSON array of objects (no prose, no markdown, just the JSON):
 [{"ticker": "...", "score": 8.2, "reason": "...", "category": "...", "trend": "...", "anomaly": "..."}]
@@ -88,19 +92,27 @@ class MarketScannerAgent(BaseAgent):
             "cached_at": time.monotonic(),
         }
 
-    async def scan(self) -> list[dict]:
+    async def scan(self, categories: list[str] | None = None) -> list[dict]:
         """
         Fetch all open markets, batch-screen with AI, return high-potential candidates.
         Uses per-ticker caching to skip re-scoring markets that haven't changed.
+
+        Args:
+            categories: Optional list of category filters (e.g. ["weather", "sports"]).
+                        None or ["all"] means scan everything.
         """
-        log.info("scanner_start")
+        # Normalize: None or ["all"] means no filtering
+        if categories and "all" in [c.lower() for c in categories]:
+            categories = None
+
+        log.info("scanner_start", categories=categories)
         all_markets = await self.kalshi.get_all_open_markets()
         log.info("scanner_fetched_markets", count=len(all_markets))
 
         # Filter by basic liquidity first (fast, no AI needed)
         liquid_markets = []
         for m in all_markets:
-            if self._passes_liquidity_filter(m):
+            if self._passes_liquidity_filter(m, categories=categories):
                 liquid_markets.append(m)
                 log.info(
                     "market_passes_filter",
@@ -227,8 +239,16 @@ class MarketScannerAgent(BaseAgent):
             except Exception as e:
                 log.debug("market_data_enrichment_failed", ticker=ticker, error=str(e))
 
-    def _passes_liquidity_filter(self, market: dict) -> bool:
-        """Fast pre-filter without AI."""
+    def _passes_liquidity_filter(self, market: dict, categories: list[str] | None = None) -> bool:
+        """Fast pre-filter without AI. Optionally filter by category."""
+        # Category filter (if specified)
+        if categories:
+            market_cat = (market.get("category", "") or "").lower()
+            market_title = (market.get("title", "") or "").lower()
+            market_ticker = (market.get("ticker", "") or "").lower()
+            if not self._matches_category(market_cat, market_title, market_ticker, categories):
+                return False
+
         # open_interest is in cents; MIN_LIQUIDITY_USD * 100 = min cents
         if market.get("open_interest", 0) < MIN_LIQUIDITY_USD * 100:
             return False
@@ -236,6 +256,32 @@ class MarketScannerAgent(BaseAgent):
         yes_bid = market.get("yes_bid", 0)
         if yes_ask == 0:  # no ask = no market
             return False
-        if yes_ask - yes_bid > 15:  # > 15 cent spread = illiquid
+        if yes_ask - yes_bid > 25:  # > 25 cent spread = illiquid (widened from 15 for niche markets)
             return False
         return True
+
+    @staticmethod
+    def _matches_category(market_cat: str, title: str, ticker: str, categories: list[str]) -> bool:
+        """Check if a market matches any of the requested category filters."""
+        # Keyword map: category filter name -> keywords to match in title/ticker/category
+        _CATEGORY_KEYWORDS: dict[str, list[str]] = {
+            "weather": ["weather", "temperature", "rain", "snow", "hurricane", "tornado", "climate", "heat", "cold", "flood"],
+            "politics": ["president", "election", "democrat", "republican", "senate", "congress", "governor", "vote", "impeach", "nominee", "political", "trump", "biden"],
+            "economics": ["gdp", "inflation", "unemployment", "fed ", "interest rate", "recession", "cpi", "jobs report", "tariff", "trade war", "stock", "s&p", "nasdaq", "dow"],
+            "sports": ["nba", "nfl", "mlb", "nhl", "soccer", "football", "basketball", "baseball", "hockey", "championship", "super bowl", "world series", "match", "game", "playoff"],
+            "crypto": ["bitcoin", "ethereum", "crypto", "btc", "eth", "solana", "dogecoin", "token"],
+            "tech": ["ai ", "artificial intelligence", "spacex", "ipo", "tesla", "apple", "google", "meta", "openai", "startup", "launch"],
+            "entertainment": ["oscar", "grammy", "movie", "film", "album", "tv show", "emmy", "box office", "streaming", "celebrity"],
+            "geopolitics": ["war", "nato", "china", "russia", "ukraine", "taiwan", "greenland", "territory", "sanction", "military", "canal"],
+            "science": ["space", "nasa", "mars", "moon", "vaccine", "fda", "drug", "clinical trial", "disease", "pandemic"],
+            "daily": ["today", "this week", "tomorrow", "daily", "weekly"],
+        }
+        combined = f"{market_cat} {title} {ticker}"
+        for cat_filter in categories:
+            cat_lower = cat_filter.lower()
+            if cat_lower == "all":
+                return True
+            keywords = _CATEGORY_KEYWORDS.get(cat_lower, [cat_lower])
+            if any(kw in combined for kw in keywords):
+                return True
+        return False

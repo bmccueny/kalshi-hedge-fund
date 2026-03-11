@@ -13,6 +13,7 @@ Design: all agents run concurrently with asyncio. News analyzer and
 portfolio monitor are background tasks; scanning loop is the main loop.
 """
 import asyncio
+import json
 import signal
 import structlog
 from core.kalshi_client import KalshiClient
@@ -155,7 +156,8 @@ class Orchestrator:
         analysis_tasks = [analyst.analyze(m) for m in top]
         estimates = await asyncio.gather(*analysis_tasks, return_exceptions=True)
 
-        # Step 3: Risk-check and execute trades for good estimates
+        # Step 3: Risk-check, execute, and track status for GUI
+        scan_results = []
         for market, estimate in zip(top, estimates):
             if isinstance(estimate, Exception):
                 log.error("analysis_error", error=str(estimate))
@@ -174,13 +176,41 @@ class Orchestrator:
                 rationale=estimate.rationale[:1000],
             )
 
-            if abs(estimate.edge_pct) < MIN_EDGE_THRESHOLD * 100:
-                log.info("edge_too_small", ticker=estimate.ticker, edge=estimate.edge_pct)
-                continue
+            # Determine trade outcome
+            trade_status = "skipped"
+            trade_detail = ""
 
-            decision = await risk_mgr.evaluate(estimate, market)
-            if decision.approved:
-                await executor.execute(decision)
+            if abs(estimate.edge_pct) < MIN_EDGE_THRESHOLD * 100:
+                trade_status = "skipped"
+                trade_detail = f"Edge {estimate.edge_pct:+.1f}% below {MIN_EDGE_THRESHOLD*100:.0f}% threshold"
+                log.info("edge_too_small", ticker=estimate.ticker, edge=estimate.edge_pct)
+            else:
+                decision = await risk_mgr.evaluate(estimate, market)
+                if decision.approved:
+                    await executor.execute(decision)
+                    trade_status = "dry_run" if self.dry_run else "executed"
+                    trade_detail = f"{decision.side.upper()} {decision.contracts}x @ {decision.price_cents}¢"
+                else:
+                    trade_status = "rejected"
+                    trade_detail = decision.rejection_reason or "Risk check failed"
+
+            scan_results.append({
+                "ticker": estimate.ticker,
+                "title": estimate.market_title,
+                "market_pct": estimate.market_price_pct,
+                "true_pct": estimate.true_prob_pct,
+                "edge_pct": estimate.edge_pct,
+                "confidence": estimate.confidence,
+                "side": estimate.recommended_side,
+                "risks": estimate.key_risks,
+                "rationale": estimate.rationale,
+                "trade_status": trade_status,
+                "trade_detail": trade_detail,
+            })
+
+        # Emit structured results for GUI consumption
+        if scan_results:
+            print(f"__SCAN_RESULT__{json.dumps(scan_results)}", flush=True)
 
     async def _research_loop(
         self,

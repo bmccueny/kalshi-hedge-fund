@@ -28,6 +28,12 @@ def _get_log_queue() -> queue.Queue:
 
 _log_queue = _get_log_queue()
 
+@st.cache_resource
+def _get_scan_result_queue() -> queue.Queue:
+    return queue.Queue()
+
+_scan_result_queue = _get_scan_result_queue()
+
 # Load .env
 dotenv.load_dotenv()
 
@@ -113,7 +119,7 @@ def fetch_kalshi_fills():
         return []
 
 
-def run_market_scan():
+def run_market_scan(categories: list[str] | None = None):
     """Run market scan in-process and return structured results."""
     try:
         sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -127,8 +133,9 @@ def run_market_scan():
                 scanner = MarketScannerAgent(kalshi)
                 analyst = ProbabilityAnalystAgent(kalshi, news)
 
-                _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning markets...")
-                candidates = await scanner.scan()
+                cat_label = ", ".join(categories) if categories and "All" not in categories else "all categories"
+                _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning markets ({cat_label})...")
+                candidates = await scanner.scan(categories=categories)
                 top = candidates[:10]
                 _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] Found {len(candidates)} candidates — analysing top {len(top)}...")
 
@@ -190,7 +197,15 @@ def start_trading(dry_run: bool):
         def read_output(p=proc):
             for line in p.stdout:
                 clean = _ANSI_ESCAPE.sub('', line.rstrip())
-                if clean:
+                if not clean:
+                    continue
+                if clean.startswith("__SCAN_RESULT__"):
+                    try:
+                        data = json.loads(clean[len("__SCAN_RESULT__"):])
+                        _scan_result_queue.put(data)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                else:
                     _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {clean}")
         threading.Thread(target=read_output, daemon=True).start()
 
@@ -214,11 +229,14 @@ with st.sidebar:
     st.subheader("API Keys")
     kalshi_key = st.text_input("Kalshi API Key", value=env.get("KALSHI_API_KEY", ""), type="password")
     anthropic_key = st.text_input("Anthropic API Key", value=env.get("ANTHROPIC_API_KEY", ""), type="password")
+    grok_key = st.text_input("Grok (xAI) API Key", value=env.get("XAI_API_KEY", ""), type="password")
 
     if st.button("💾 Save API Keys", type="primary"):
         env["KALSHI_API_KEY"] = kalshi_key
         if anthropic_key:
             env["ANTHROPIC_API_KEY"] = anthropic_key
+        if grok_key:
+            env["XAI_API_KEY"] = grok_key
         save_env(env)
         fetch_kalshi_balance.clear()
         fetch_kalshi_positions.clear()
@@ -245,11 +263,28 @@ with st.sidebar:
     ) / 100
     dry_run_toggle = st.toggle("Dry Run Mode", value=env.get("DRY_RUN", "true") == "true")
 
+    st.divider()
+    st.subheader("Market Categories")
+    _ALL_CATEGORIES = ["All", "Weather", "Politics", "Economics", "Sports", "Crypto", "Tech", "Entertainment", "Geopolitics", "Science", "Daily"]
+    # Load saved categories or default to All
+    _saved_cats = env.get("SCAN_CATEGORIES", "All")
+    _default_cats = [c for c in _saved_cats.split(",") if c in _ALL_CATEGORIES] or ["All"]
+    selected_categories = st.multiselect(
+        "Scan categories",
+        options=_ALL_CATEGORIES,
+        default=_default_cats,
+        help="Select which market types to scan. 'All' includes everything."
+    )
+    # If nothing selected or All is included, treat as All
+    if not selected_categories or "All" in selected_categories:
+        selected_categories = ["All"]
+
     if st.button("💾 Save Settings", type="primary"):
         env["TOTAL_CAPITAL_USD"] = str(int(total_capital))
         env["MAX_SINGLE_MARKET_PCT"] = str(max_position_pct)
         env["MIN_EDGE_THRESHOLD"] = str(min_edge)
         env["DRY_RUN"] = "true" if dry_run_toggle else "false"
+        env["SCAN_CATEGORIES"] = ",".join(selected_categories)
         save_env(env)
         st.success("Saved!")
 
@@ -315,8 +350,9 @@ with col3:
     if st.button("🔄 Scan Markets", type="secondary", disabled=is_scanning()):
         st.session_state.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] --- Starting market scan ---")
         st.session_state.scan_running = True
+        scan_cats = selected_categories if selected_categories != ["All"] else None
         with st.spinner("Scanning markets & running AI analysis..."):
-            results = run_market_scan()
+            results = run_market_scan(categories=scan_cats)
         st.session_state.scan_running = False
         if results is not None:
             st.session_state.scan_results = results
@@ -336,6 +372,16 @@ def live_logs_fragment():
     while not _log_queue.empty():
         st.session_state.logs.append(_log_queue.get_nowait())
         drained = True
+
+    # Drain scan result queue — update table with latest trading loop results
+    new_scan_results = False
+    while not _scan_result_queue.empty():
+        st.session_state.scan_results = _scan_result_queue.get_nowait()
+        new_scan_results = True
+
+    # Force full page rerun so Scan Results table renders the new data
+    if new_scan_results:
+        st.rerun()
 
     log_container = st.container(height=300)
     with log_container:
@@ -362,25 +408,33 @@ else:
     scan_data = st.session_state.scan_results
 
     # Summary metrics row
-    sc1, sc2, sc3, sc4 = st.columns(4)
+    has_trade_status = any(r.get("trade_status") for r in scan_data)
+    sc_cols = st.columns(5 if has_trade_status else 4)
     avg_edge = sum(abs(r["edge_pct"]) for r in scan_data) / len(scan_data)
     avg_conf = sum(r["confidence"] for r in scan_data) / len(scan_data)
     buy_yes = sum(1 for r in scan_data if r.get("side") == "yes")
     buy_no = sum(1 for r in scan_data if r.get("side") == "no")
-    with sc1:
+    with sc_cols[0]:
         st.metric("Opportunities", len(scan_data))
-    with sc2:
+    with sc_cols[1]:
         st.metric("Avg Edge", f"{avg_edge:+.1f}%")
-    with sc3:
+    with sc_cols[2]:
         st.metric("Avg Confidence", f"{avg_conf:.0%}")
-    with sc4:
+    with sc_cols[3]:
         st.metric("YES / NO", f"{buy_yes} / {buy_no}")
+    if has_trade_status:
+        traded = sum(1 for r in scan_data if r.get("trade_status") in ("executed", "dry_run"))
+        rejected = sum(1 for r in scan_data if r.get("trade_status") == "rejected")
+        with sc_cols[4]:
+            st.metric("Traded / Rejected", f"{traded} / {rejected}")
 
     # Build table rows
     scan_rows = []
     for r in scan_data:
         side = (r.get("side") or "—").upper()
-        scan_rows.append({
+        status = r.get("trade_status", "—")
+        status_display = status.replace("_", " ").title() if status != "—" else "—"
+        row = {
             "Ticker": r["ticker"],
             "Title": r["title"][:45],
             "Side": side,
@@ -388,7 +442,9 @@ else:
             "True %": f"{r['true_pct']:.1f}%",
             "Edge": f"{r['edge_pct']:+.1f}%",
             "Confidence": f"{r['confidence']:.0%}",
-        })
+            "Status": status_display,
+        }
+        scan_rows.append(row)
 
     scan_df = pd.DataFrame(scan_rows)
 
@@ -428,9 +484,24 @@ else:
             return "color: #ef4444; font-weight: bold"
         return "color: #6b7280"
 
+    def color_status(val):
+        v = val.lower()
+        if v == "executed":
+            return "color: #22c55e; font-weight: bold"
+        elif v == "dry run":
+            return "color: #38bdf8; font-weight: bold"
+        elif v == "rejected":
+            return "color: #f97316; font-weight: bold"
+        elif v == "skipped":
+            return "color: #6b7280"
+        elif v == "error":
+            return "color: #ef4444; font-weight: bold"
+        return ""
+
     styled = scan_df.style.map(color_edge, subset=["Edge"]) \
                           .map(color_confidence, subset=["Confidence"]) \
-                          .map(color_side, subset=["Side"])
+                          .map(color_side, subset=["Side"]) \
+                          .map(color_status, subset=["Status"])
 
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
@@ -445,6 +516,12 @@ else:
                 f"Confidence: `{r['confidence']:.0%}` · "
                 f"Side: `{side_label}`"
             )
+            # Trade status detail (only present when run from trading loop)
+            trade_detail = r.get("trade_detail", "")
+            trade_status = r.get("trade_status", "")
+            if trade_status:
+                status_display = trade_status.replace("_", " ").title()
+                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;Trade: `{status_display}` — {trade_detail}")
             st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;*{r.get('rationale', 'N/A')[:300]}*")
             risks = r.get("risks", [])
             if risks:
