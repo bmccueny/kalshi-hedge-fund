@@ -210,9 +210,16 @@ def start_trading(dry_run: bool):
         threading.Thread(target=read_output, daemon=True).start()
 
 def stop_trading():
-    if st.session_state.trading_process:
-        st.session_state.trading_process.terminate()
+    proc = st.session_state.trading_process
+    if proc:
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
         st.session_state.trading_process = None
+        _log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] --- Trading stopped ---")
 
 def is_trading():
     return st.session_state.trading_process is not None and st.session_state.trading_process.poll() is None
